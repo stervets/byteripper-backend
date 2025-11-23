@@ -56,11 +56,30 @@ export interface Ctx {
   setResult(scriptId: string, value: any): void;
 }
 
+export type CtxPhase =
+  | 'onTxStart'
+  | 'onStart'
+  | 'onStep'
+  | 'onFinish'
+  | 'onTxEnd';
+
+export interface StepSnapshot {
+  pc: number;
+  opcode: string;
+  stack: string[];                  // bigint[] → string[]
+  rawMemory?: string[];             // как в TraceStep
+  rawStorage?: Record<string, string>;
+}
+
 export interface CtxSnapshot {
-  phase: 'onTxStart' | 'onStart' | 'onStep' | 'onFinish' | 'onTxEnd';
+  phase: CtxPhase;
   scriptId: string;
-  stepIndex: number;
-  ctx: Ctx; // глубокий clone
+  stepIndex: number;                // -1 если шага нет (onStart/onTxStart/onFinish/onTxEnd без трейса)
+  snapshot: {
+    step?: StepSnapshot;            // может не быть, если нет step
+    store: any;                     // deep clone
+    shared: any;                    // deep clone
+  };
 }
 
 /* Жизненные хуки скриптов */

@@ -1,12 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import {
   Ctx,
+  CtxPhase,
   CtxSnapshot,
   PcMark,
   RunnerEnv,
   RunnerOutput,
   ScriptLifecycle,
   ScriptResult,
+  StepSnapshot,
   ViewDescriptor,
 } from './types';
 import { TraceStep } from '../evm/types';
@@ -121,9 +123,30 @@ export class ScriptRunnerService {
       };
     };
 
+    function deepClone<T = any>(value: T): T {
+      return JSON.parse(
+        JSON.stringify(value, (_, v) => {
+          if (typeof v === 'bigint') return v.toString();
+          if (typeof v === 'function') return undefined;
+          return v;
+        }),
+      );
+    }
+
+    function cloneStep(step: TraceStep | undefined): StepSnapshot | undefined {
+      if (!step) return undefined;
+      return {
+        pc: step.pc,
+        opcode: step.opcode,
+        stack: step.stack.map((x) => x.toString()), // bigint → string
+        rawMemory: step.rawMemory ? [...step.rawMemory] : undefined,
+        rawStorage: step.rawStorage ? { ...step.rawStorage } : undefined,
+      };
+    }
+
     const snapshot = (
       scriptId: string,
-      phase: CtxSnapshot['phase'],
+      phase: CtxPhase,
       stepIndex: number,
       ctx: Ctx,
     ) => {
@@ -131,7 +154,11 @@ export class ScriptRunnerService {
         scriptId,
         phase,
         stepIndex,
-        ctx: structuredClone(ctx),
+        snapshot: {
+          step: cloneStep(ctx.step),
+          store: deepClone(ctx.store),
+          shared: deepClone(ctx.shared),
+        },
       });
     };
 
