@@ -3,34 +3,54 @@ import { Injectable, Logger } from '@nestjs/common';
 import { JsonRpcProvider, Wallet } from 'ethers';
 import * as fs from 'fs/promises';
 import { ContractJsonArtifact, DeployResult } from './types';
+import { AccountService } from './account.service';
 
 @Injectable()
 export class EvmService {
   private readonly logger = new Logger(EvmService.name);
-  private readonly provider: JsonRpcProvider;
+  private readonly wallet: Wallet;
 
-  constructor() {
-    const rpcUrl = process.env.RPC_URL ?? 'http://127.0.0.1:8545';
-    this.provider = new JsonRpcProvider(rpcUrl);
+  constructor(
+    private readonly provider: JsonRpcProvider,
+    private readonly accounts: AccountService,
+  ) {}
+
+  async getBalance(addr: string): Promise<bigint> {
+    return await this.provider.getBalance(addr);
+  }
+
+  private extractBytecode(value: any): string | undefined {
+    if (!value) return undefined;
+
+    if (typeof value === 'string') {
+      return value.startsWith('0x') ? value : '0x' + value;
+    }
+
+    if (typeof value === 'object' && typeof value.object === 'string') {
+      return value.object.startsWith('0x') ? value.object : '0x' + value.object;
+    }
+
+    return undefined;
   }
 
   async loadFromJsonAndMaybeDeploy(path: string): Promise<DeployResult> {
-    const jsonRaw = await fs.readFile(path, 'utf8');
-    const artifact = JSON.parse(jsonRaw);
+    const artifactRaw = await fs.readFile(path, 'utf8');
+    const artifactJson = JSON.parse(artifactRaw);
 
-    const creationBytecode = this.extractBytecode(artifact.bytecode);
-    const runtimeBytecode  = this.extractBytecode(artifact.deployedBytecode);
+    const creationStr = this.extractBytecode(artifactJson.bytecode);
+    const runtimeStr = this.extractBytecode(artifactJson.deployedBytecode);
 
-    if (!runtimeBytecode) {
-      throw new Error('JSON artifact has no deployedBytecode (neither string nor object.object).');
+    if (!runtimeStr) {
+      throw new Error("Artifact has no deployedBytecode (string or object.object)");
     }
 
-    let contractAddress: string | undefined;
+    // ⬇️ И ДАЛЬШЕ УЖЕ ТОЛЬКО СТРОКИ
+    const creationBytecode: string | undefined = creationStr;
+    const runtimeBytecode: string = runtimeStr;
 
+    let contractAddress;
     if (creationBytecode) {
       contractAddress = await this.deployRaw(creationBytecode);
-    } else {
-      this.logger.warn('No creation bytecode found in artifact, skipping deploy');
     }
 
     return {
@@ -39,10 +59,6 @@ export class EvmService {
     };
   }
 
-  /**
-   * Режим: нам дали только runtimeBytecode (0x...).
-   * Оборачиваем его в минимальный init-код и деплоим в anvil.
-   */
   async fromRuntimeOnly(runtimeBytecode: string): Promise<DeployResult> {
     const hex = runtimeBytecode.trim();
     if (!hex.startsWith('0x')) {
@@ -58,40 +74,61 @@ export class EvmService {
 
     return {
       contractAddress,
-      // В качестве "истины" по-прежнему считаем тот runtime, который нам дали
       runtimeBytecode: hex,
     };
   }
 
-  /** Простой деплой "сыраго" байткода в anvil */
+  private async waitForReceipt(hash: string) {
+    while (true) {
+      const receipt = await this.provider.getTransactionReceipt(hash);
+      if (receipt) return receipt;
+      await new Promise((res) => setTimeout(res, 100));
+    }
+  }
+
   private async deployRaw(creationBytecode: string): Promise<string> {
-    const pk =
-      process.env.DEPLOYER_PK ??
-      // дефолтный приватник из anvil/hardhat (для локальной дев-сети пофиг)
-      '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+    await this.accounts.loadAccounts();
+    const from = this.accounts.get(0);
 
-    const wallet = new Wallet(pk, this.provider);
+    this.logger.log(`Deploying from ${from}...`);
 
-    this.logger.log('Sending deploy tx...');
-    const tx = await wallet.sendTransaction({
-      data: creationBytecode,
-    });
+    const txHash = await (this.provider as any).send('eth_sendTransaction', [
+      {
+        from,
+        data: creationBytecode,
+      },
+    ]);
 
-    const receipt = await tx.wait();
-    if (!receipt || !receipt.contractAddress) {
-      throw new Error('Deploy failed, no contractAddress in receipt');
+    const receipt = await this.waitForReceipt(txHash);
+
+    if (!receipt.contractAddress) {
+      throw new Error('Deploy failed: no contractAddress in receipt');
     }
 
     this.logger.log(`Deployed at: ${receipt.contractAddress}`);
-
     return receipt.contractAddress;
   }
 
   /**
-   * Оборачиваем runtime-код в минимальный init-code:
-   * PUSH2 <len> PUSH1 0x00 PUSH2 0x000f CODECOPY PUSH2 <len> PUSH1 0x00 RETURN <runtime>
-   * Префикс фиксированно 15 байт, поэтому offset = 0x000f.
+   * Простейшая транзакция на контракт:
+   * - без calldata (просто дергаем fallback/receive или nothing)
+   * - возвращаем txHash, чтобы потом прогнать debug_traceTransaction
    */
+  async sendSimpleTx(to: string, fromIndex = 0): Promise<string> {
+    await this.accounts.loadAccounts();
+    const from = this.accounts.get(fromIndex);
+
+    const txHash = await (this.provider as any).send('eth_sendTransaction', [
+      {
+        from,
+        to,
+      },
+    ]);
+
+    await this.waitForReceipt(txHash);
+    return txHash;
+  }
+
   private wrapRuntimeIntoCreation(runtimeBytecode: string): string {
     const rt = runtimeBytecode.startsWith('0x')
       ? runtimeBytecode.slice(2)
@@ -101,49 +138,27 @@ export class EvmService {
       throw new Error('Invalid runtime bytecode: odd hex length');
     }
 
-    const len = rt.length / 2; // bytes
-    const lenHex = len.toString(16).padStart(4, '0'); // always PUSH2
-    const offsetHex = '000f'; // fixed prefix length = 15 bytes
+    const len = rt.length / 2;
+    const lenHex = len.toString(16).padStart(4, '0');
+    const offsetHex = '000f';
 
     const init =
       '0x' +
-      '61' +
-      lenHex + // PUSH2 <len>
-      '60' +
-      '00' + // PUSH1 0x00
-      '61' +
-      offsetHex + // PUSH2 0x000f
+      '61' + lenHex + // PUSH2 <len>
+      '60' + '00' + // PUSH1 0x00
+      '61' + offsetHex + // PUSH2 0x000f
       '39' + // CODECOPY
-      '61' +
-      lenHex + // PUSH2 <len>
-      '60' +
-      '00' + // PUSH1 0x00
+      '61' + lenHex + // PUSH2 <len>
+      '60' + '00' + // PUSH1 0x00
       'f3' + // RETURN
-      rt; // <runtime>
+      rt;
 
     this.logger.log(
-      `Wrapped runtime into creation: runtimeLen=${len} bytes, initLen=${init.length / 2} bytes`,
+      `Wrapped runtime into creation: runtimeLen=${len} bytes, initLen=${
+        init.length / 2
+      } bytes`,
     );
 
     return init;
-  }
-
-  private extractBytecode(value: any): string | undefined {
-    if (!value) return undefined;
-
-    // Foundry / raw hex
-    if (typeof value === 'string') {
-      return value.startsWith('0x') ? value : '0x' + value;
-    }
-
-    // Hardhat format:
-    // bytecode: { object: "...", sourceMap: "...", linkReferences: {...} }
-    if (typeof value === 'object' && typeof value.object === 'string') {
-      return value.object.startsWith('0x')
-        ? value.object
-        : '0x' + value.object;
-    }
-
-    return undefined;
   }
 }

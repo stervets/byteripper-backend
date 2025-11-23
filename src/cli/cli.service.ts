@@ -4,6 +4,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { EvmService } from '../evm/evm.service';
 import { BytecodeService } from '../evm/bytecode.service';
+import { TraceService } from '../evm/trace.service';
 
 @Injectable()
 export class CliService {
@@ -12,6 +13,7 @@ export class CliService {
   constructor(
     private readonly evm: EvmService,
     private readonly bytecode: BytecodeService,
+    private readonly traceService: TraceService,
   ) {}
 
   async run(argv: string[]): Promise<void> {
@@ -28,10 +30,8 @@ export class CliService {
     let deployResult;
 
     if (ext === '.json') {
-      // режим: JSON-артефакт (Foundry/Hardhat)
       deployResult = await this.evm.loadFromJsonAndMaybeDeploy(targetPath);
     } else {
-      // режим: файл с runtime-байткодом (0x...)
       const content = await fs.readFile(targetPath, 'utf8');
       const runtimeBytecode = content.trim();
       deployResult = await this.evm.fromRuntimeOnly(runtimeBytecode);
@@ -39,7 +39,9 @@ export class CliService {
 
     const { contractAddress, runtimeBytecode } = deployResult;
 
-    this.logger.log(`Runtime bytecode length: ${runtimeBytecode.length / 2} bytes`);
+    this.logger.log(
+      `Runtime bytecode length: ${runtimeBytecode.length / 2} bytes`,
+    );
     if (contractAddress) {
       this.logger.log(`Contract deployed at: ${contractAddress}`);
     } else {
@@ -48,11 +50,39 @@ export class CliService {
 
     const disasm = this.bytecode.disassemble(runtimeBytecode);
 
-    // Пока просто в консоль
     this.logger.log('First 32 bytes of disasm:');
     for (let i = 0; i < Math.min(disasm.length, 32); i++) {
       const b = disasm[i];
-      console.log(`${b.pc.toString().padStart(4, ' ')}: 0x${b.byte.toString(16).padStart(2, '0')}`);
+      console.log(
+        `${b.pc.toString().padStart(4, ' ')}: 0x${b.byte
+          .toString(16)
+          .padStart(2, '0')}`,
+      );
+    }
+
+    if (!contractAddress) {
+      this.logger.warn(
+        'No contract address, skipping tx/trace (runtime-only without deploy).',
+      );
+      return;
+    }
+
+    // 🔥 Простая tx и трейс
+    const txHash = await this.evm.sendSimpleTx(contractAddress);
+    this.logger.log(`Tracing tx: ${txHash}`);
+
+    const steps = await this.traceService.debugTrace(txHash);
+
+    this.logger.log(`Trace steps: ${steps.length}`);
+    this.logger.log('First 10 trace steps:');
+
+    for (let i = 0; i < Math.min(steps.length, 10); i++) {
+      const s = steps[i];
+      console.log(
+        `#${i.toString().padStart(3, ' ')} pc=${s.pc
+          .toString()
+          .padStart(4, ' ')} op=${s.opcode.padEnd(12, ' ')} gas=${s.gas}`,
+      );
     }
   }
 }

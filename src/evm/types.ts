@@ -7,11 +7,39 @@ export interface RawByte {
 
 export interface ContractJsonArtifact {
   abi?: any[];
-  bytecode?: string;          // creation bytecode
-  deployedBytecode?: string;  // runtime bytecode (как у Foundry/Hardhat)
+  bytecode?: string;
+  deployedBytecode?: string;
 }
 
 export interface DeployResult {
-  contractAddress?: string;   // может быть undefined, если деплой не делали
-  runtimeBytecode: string;    // 0x...
+  contractAddress?: string;
+  runtimeBytecode: string;
+}
+
+export interface RawStructLog {
+  pc: number;
+  op: string;
+  gas: number;
+  gasCost: number;
+  depth: number;
+  stack?: string[];
+  memory?: string[];
+  storage?: Record<string, string>;
+}
+
+export interface TraceStep {
+  pc: number;
+  opcode: string;
+  gas: number;
+  gasCost: number;
+  depth: number;
+  stack: bigint[];
+  // пока без заморочек: memory и storage оставим "как есть",
+  // потом уже сделаем нормальную нормализацию под ByteRipper
+  rawMemory?: string[];
+  rawStorage?: Record<string, string>;
+}
+
+export interface TraceResult {
+  structLogs: RawStructLog[];
 }
