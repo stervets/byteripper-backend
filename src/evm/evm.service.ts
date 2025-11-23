@@ -1,14 +1,13 @@
 // src/evm/evm.service.ts
 import { Injectable, Logger } from '@nestjs/common';
-import { JsonRpcProvider, Wallet } from 'ethers';
+import { JsonRpcProvider } from 'ethers';
 import * as fs from 'fs/promises';
-import { ContractJsonArtifact, DeployResult } from './types';
+import { DeployResult } from './types';
 import { AccountService } from './account.service';
 
 @Injectable()
 export class EvmService {
   private readonly logger = new Logger(EvmService.name);
-  private readonly wallet: Wallet;
 
   constructor(
     private readonly provider: JsonRpcProvider,

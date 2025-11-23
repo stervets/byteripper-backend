@@ -1,11 +1,11 @@
 // src/evm/trace.service.ts
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { JsonRpcProvider } from 'ethers';
 import { RawStructLog, TraceResult, TraceStep } from './types';
 
 @Injectable()
 export class TraceService {
-  private readonly logger = new Logger(TraceService.name);
+  //private readonly logger = new Logger(TraceService.name);
 
   constructor(private readonly provider: JsonRpcProvider) {}
 
@@ -26,7 +26,7 @@ export class TraceService {
     const logs: RawStructLog[] =
       (raw as any).structLogs ?? (raw as any).struct_logs ?? [];
 
-    const steps: TraceStep[] = logs.map((log) => ({
+    return logs.map((log) => ({
       pc: log.pc,
       opcode: log.op,
       gas: log.gas,
@@ -36,7 +36,5 @@ export class TraceService {
       rawMemory: log.memory,
       rawStorage: log.storage,
     }));
-
-    return steps;
   }
 }
