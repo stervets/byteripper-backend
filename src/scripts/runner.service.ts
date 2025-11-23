@@ -277,7 +277,7 @@ export class ScriptRunnerService {
       isPush: false,
       isDup: false,
       isSwap: false,
-      setResult: function (scriptId: string, value: any): void {
+      setResult: function (): void {
         throw new Error('Function not implemented.');
       },
     });
