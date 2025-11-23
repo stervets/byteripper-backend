@@ -1,8 +1,8 @@
 // src/evm/evm.service.ts
 import { Injectable, Logger } from '@nestjs/common';
-import { JsonRpcProvider } from 'ethers';
+import { JsonRpcProvider, TransactionResponse } from 'ethers';
 import * as fs from 'fs/promises';
-import { DeployResult } from './types';
+import { DeployResult, TxMeta } from './types';
 import { AccountService } from './account.service';
 
 @Injectable()
@@ -40,7 +40,9 @@ export class EvmService {
     const runtimeStr = this.extractBytecode(artifactJson.deployedBytecode);
 
     if (!runtimeStr) {
-      throw new Error("Artifact has no deployedBytecode (string or object.object)");
+      throw new Error(
+        'Artifact has no deployedBytecode (string or object.object)',
+      );
     }
 
     // ⬇️ И ДАЛЬШЕ УЖЕ ТОЛЬКО СТРОКИ
@@ -55,6 +57,7 @@ export class EvmService {
     return {
       contractAddress,
       runtimeBytecode,
+      creationBytecode
     };
   }
 
@@ -74,6 +77,7 @@ export class EvmService {
     return {
       contractAddress,
       runtimeBytecode: hex,
+      creationBytecode
     };
   }
 
@@ -128,6 +132,55 @@ export class EvmService {
     return txHash;
   }
 
+  private async getFromAccount(index = 0): Promise<{ from: string }> {
+    await this.accounts.loadAccounts();
+    const from = this.accounts.get(index);
+    return { from };
+  }
+
+  async sendSimpleTxWithMeta(
+    to: string,
+    fromIndex = 0,
+  ): Promise<{ txHash: string; txMeta: TxMeta }> {
+    const { from } = await this.getFromAccount(fromIndex);
+
+    this.logger.log(`Sending simple tx from ${from} to ${to} ...`);
+
+    const txHash: string = await (this.provider as any).send(
+      'eth_sendTransaction',
+      [
+        {
+          from,
+          to,
+        },
+      ],
+    );
+
+    const receipt = await this.waitForReceipt(txHash);
+    const tx: TransactionResponse | null = await this.provider.getTransaction(txHash);
+
+    if (tx === null) {
+      throw new Error(
+        `sendSimpleTxWithMeta: TransactionResponse error. ${txHash}`,
+      );
+    }
+
+    const txMeta: TxMeta = {
+      hash: tx.hash,
+      from: tx.from!,
+      to: tx.to ?? undefined,
+      value: tx.value ? BigInt(tx.value.toString()) : 0n,
+      gasUsed: BigInt(receipt.gasUsed.toString()),
+      status: receipt.status ?? undefined,
+      input: tx.data,
+      nonce: tx.nonce,
+      blockNumber: receipt.blockNumber ?? undefined,
+      contractAddress: receipt.contractAddress ?? undefined,
+    };
+
+    return { txHash, txMeta };
+  }
+
   private wrapRuntimeIntoCreation(runtimeBytecode: string): string {
     const rt = runtimeBytecode.startsWith('0x')
       ? runtimeBytecode.slice(2)
@@ -143,12 +196,17 @@ export class EvmService {
 
     const init =
       '0x' +
-      '61' + lenHex + // PUSH2 <len>
-      '60' + '00' + // PUSH1 0x00
-      '61' + offsetHex + // PUSH2 0x000f
+      '61' +
+      lenHex + // PUSH2 <len>
+      '60' +
+      '00' + // PUSH1 0x00
+      '61' +
+      offsetHex + // PUSH2 0x000f
       '39' + // CODECOPY
-      '61' + lenHex + // PUSH2 <len>
-      '60' + '00' + // PUSH1 0x00
+      '61' +
+      lenHex + // PUSH2 <len>
+      '60' +
+      '00' + // PUSH1 0x00
       'f3' + // RETURN
       rt;
 

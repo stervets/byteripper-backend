@@ -1,0 +1,10 @@
+{
+  "scripts": [
+    {
+      "id": "user.myFirstCheck",
+      "file": "my-first-check.ts",
+      "enabled": true,
+      "dependsOn": ["core.heatmap"]
+    }
+  ]
+}

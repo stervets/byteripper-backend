@@ -5,6 +5,10 @@ import * as path from 'path';
 import { EvmService } from '../evm/evm.service';
 import { BytecodeService } from '../evm/bytecode.service';
 import { TraceService } from '../evm/trace.service';
+import { ScriptRunnerService } from '../scripts/runner.service';
+import { ScriptLoaderService } from '../scripts/script-loader.service';
+import { RunnerEnv } from '../scripts/types';
+import { TxMeta } from '../evm/types';
 
 @Injectable()
 export class CliService {
@@ -14,11 +18,13 @@ export class CliService {
     private readonly evm: EvmService,
     private readonly bytecode: BytecodeService,
     private readonly traceService: TraceService,
+    private readonly scriptRunner: ScriptRunnerService,
+    private readonly scriptLoader: ScriptLoaderService,
   ) {}
 
   async run(argv: string[]): Promise<void> {
     if (!argv[0]) {
-      this.logger.error('Usage: yarn dev <path-to-json-or-runtime-hex-file>');
+      this.logger.error('Usage: yarn dev <path-to-json-or-runtime-file>');
       return;
     }
 
@@ -26,63 +32,86 @@ export class CliService {
     this.logger.log(`Target: ${targetPath}`);
 
     const ext = path.extname(targetPath).toLowerCase();
-
-    let deployResult;
+    let runtimeBytecode: string;
+    let creationBytecode: string | undefined;
+    let contractAddress: string | undefined;
 
     if (ext === '.json') {
-      deployResult = await this.evm.loadFromJsonAndMaybeDeploy(targetPath);
+      // артефакт
+      const deployed = await this.evm.loadFromJsonAndMaybeDeploy(targetPath);
+      runtimeBytecode = deployed.runtimeBytecode;
+      creationBytecode = deployed.creationBytecode;
+      contractAddress = deployed.contractAddress;
     } else {
+      // файл с runtime-байткодом
       const content = await fs.readFile(targetPath, 'utf8');
-      const runtimeBytecode = content.trim();
-      deployResult = await this.evm.fromRuntimeOnly(runtimeBytecode);
-    }
-
-    const { contractAddress, runtimeBytecode } = deployResult;
-
-    this.logger.log(
-      `Runtime bytecode length: ${runtimeBytecode.length / 2} bytes`,
-    );
-    if (contractAddress) {
-      this.logger.log(`Contract deployed at: ${contractAddress}`);
-    } else {
-      this.logger.warn('Contract was not deployed (runtime-only mode).');
-    }
-
-    const disasm = this.bytecode.disassemble(runtimeBytecode);
-
-    this.logger.log('First 32 bytes of disasm:');
-    for (let i = 0; i < Math.min(disasm.length, 32); i++) {
-      const b = disasm[i];
-      console.log(
-        `${b.pc.toString().padStart(4, ' ')}: 0x${b.byte
-          .toString(16)
-          .padStart(2, '0')}`,
-      );
+      runtimeBytecode = content.trim();
+      const res = await this.evm.fromRuntimeOnly(runtimeBytecode);
+      contractAddress = res.contractAddress;
+      creationBytecode = res.creationBytecode;
     }
 
     if (!contractAddress) {
-      this.logger.warn(
-        'No contract address, skipping tx/trace (runtime-only without deploy).',
-      );
+      this.logger.error('No contract address after deploy, abort.');
       return;
     }
 
-    // 🔥 Простая tx и трейс
-    const txHash = await this.evm.sendSimpleTx(contractAddress);
+    this.logger.log(
+      `Runtime bytecode length: ${(runtimeBytecode.length - 2) / 2} bytes`,
+    );
+    this.logger.log(`Contract deployed at: ${contractAddress}`);
+
+    const runtimeDisasm = this.bytecode.disassemble(runtimeBytecode);
+    const creationDisasm = creationBytecode
+      ? this.bytecode.disassemble(creationBytecode)
+      : [];
+
+    // простая транза для получения трейса
+    const { txHash, txMeta } = await this.evm.sendSimpleTxWithMeta(
+      contractAddress,
+    );
+
     this.logger.log(`Tracing tx: ${txHash}`);
 
-    const steps = await this.traceService.debugTrace(txHash);
+    const trace = await this.traceService.debugTrace(txHash);
 
-    this.logger.log(`Trace steps: ${steps.length}`);
+    this.logger.log(`Trace steps: ${trace.length}`);
     this.logger.log('First 10 trace steps:');
-
-    for (let i = 0; i < Math.min(steps.length, 10); i++) {
-      const s = steps[i];
-      console.log(
+    for (let i = 0; i < Math.min(trace.length, 10); i++) {
+      const s = trace[i];
+      this.logger.log(
         `#${i.toString().padStart(3, ' ')} pc=${s.pc
           .toString()
           .padStart(4, ' ')} op=${s.opcode.padEnd(12, ' ')} gas=${s.gas}`,
       );
     }
+
+    // RunnerEnv
+    const env: RunnerEnv = {
+      contractAddress,
+      runtimeBytecode,
+      creationBytecode,
+      runtimeDisasm,
+      creationDisasm,
+      trace,
+      tx: txMeta as TxMeta,
+      isCreationPhase: false,
+    };
+
+    // грузим все скрипты (core + user)
+    const scripts = await this.scriptLoader.loadAllScripts();
+
+    this.logger.log(
+      `Executing scripts: ${scripts.map((s) => s.id).join(', ')}`,
+    );
+
+    const output = await this.scriptRunner.runForTx(env, scripts);
+
+    this.logger.log('Script results:');
+    console.dir(output.scripts, { depth: null });
+
+    this.logger.log(`Views count: ${output.views.length}`);
+    this.logger.log(`Marks count: ${output.marks.length}`);
+    this.logger.log(`Snapshots count: ${output.snapshots.length}`);
   }
 }

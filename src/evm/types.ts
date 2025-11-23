@@ -27,6 +27,7 @@ export interface ContractJsonArtifact {
 export interface DeployResult {
   contractAddress?: string;
   runtimeBytecode: string;
+  creationBytecode?: string;
 }
 
 export interface RawStructLog {
@@ -62,9 +63,7 @@ export interface TxMeta {
   value: bigint;
   gasUsed: bigint;
   status?: number;
-
-  // опционально, но полезно:
-  input: string;           // calldata
+  input: string;
   nonce: number;
   blockNumber?: number;
 
