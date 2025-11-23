@@ -16,20 +16,13 @@ export class EvmService {
 
   async loadFromJsonAndMaybeDeploy(path: string): Promise<DeployResult> {
     const jsonRaw = await fs.readFile(path, 'utf8');
-    const artifact = JSON.parse(jsonRaw) as ContractJsonArtifact;
+    const artifact = JSON.parse(jsonRaw);
 
-    const creationBytecode =
-      artifact.bytecode && artifact.bytecode !== '0x'
-        ? artifact.bytecode
-        : undefined;
-
-    const runtimeBytecode =
-      artifact.deployedBytecode && artifact.deployedBytecode !== '0x'
-        ? artifact.deployedBytecode
-        : undefined;
+    const creationBytecode = this.extractBytecode(artifact.bytecode);
+    const runtimeBytecode  = this.extractBytecode(artifact.deployedBytecode);
 
     if (!runtimeBytecode) {
-      throw new Error('No deployedBytecode found in JSON artifact');
+      throw new Error('JSON artifact has no deployedBytecode (neither string nor object.object).');
     }
 
     let contractAddress: string | undefined;
@@ -37,7 +30,7 @@ export class EvmService {
     if (creationBytecode) {
       contractAddress = await this.deployRaw(creationBytecode);
     } else {
-      this.logger.warn('No creation bytecode in artifact, skipping deploy');
+      this.logger.warn('No creation bytecode found in artifact, skipping deploy');
     }
 
     return {
@@ -47,9 +40,8 @@ export class EvmService {
   }
 
   /**
-   * Режим: нам дали только runtimeBytecode (0x...)
-   * Пока деплой не делаем — только анализируем байткод.
-   * Позже можно будет добавить генерацию минимального init-кода.
+   * Режим: нам дали только runtimeBytecode (0x...).
+   * Оборачиваем его в минимальный init-код и деплоим в anvil.
    */
   async fromRuntimeOnly(runtimeBytecode: string): Promise<DeployResult> {
     const hex = runtimeBytecode.trim();
@@ -57,10 +49,16 @@ export class EvmService {
       throw new Error('Runtime bytecode must start with 0x');
     }
 
-    this.logger.log('Runtime-only mode, no deployment will be performed (for now).');
+    this.logger.log(
+      'Runtime-only mode: wrapping into minimal creation bytecode and deploying...',
+    );
+
+    const creationBytecode = this.wrapRuntimeIntoCreation(hex);
+    const contractAddress = await this.deployRaw(creationBytecode);
 
     return {
-      contractAddress: undefined,
+      contractAddress,
+      // В качестве "истины" по-прежнему считаем тот runtime, который нам дали
       runtimeBytecode: hex,
     };
   }
@@ -77,7 +75,6 @@ export class EvmService {
     this.logger.log('Sending deploy tx...');
     const tx = await wallet.sendTransaction({
       data: creationBytecode,
-      // gasLimit можно не ставить — anvil сам подберёт
     });
 
     const receipt = await tx.wait();
@@ -88,5 +85,65 @@ export class EvmService {
     this.logger.log(`Deployed at: ${receipt.contractAddress}`);
 
     return receipt.contractAddress;
+  }
+
+  /**
+   * Оборачиваем runtime-код в минимальный init-code:
+   * PUSH2 <len> PUSH1 0x00 PUSH2 0x000f CODECOPY PUSH2 <len> PUSH1 0x00 RETURN <runtime>
+   * Префикс фиксированно 15 байт, поэтому offset = 0x000f.
+   */
+  private wrapRuntimeIntoCreation(runtimeBytecode: string): string {
+    const rt = runtimeBytecode.startsWith('0x')
+      ? runtimeBytecode.slice(2)
+      : runtimeBytecode;
+
+    if (rt.length % 2 !== 0) {
+      throw new Error('Invalid runtime bytecode: odd hex length');
+    }
+
+    const len = rt.length / 2; // bytes
+    const lenHex = len.toString(16).padStart(4, '0'); // always PUSH2
+    const offsetHex = '000f'; // fixed prefix length = 15 bytes
+
+    const init =
+      '0x' +
+      '61' +
+      lenHex + // PUSH2 <len>
+      '60' +
+      '00' + // PUSH1 0x00
+      '61' +
+      offsetHex + // PUSH2 0x000f
+      '39' + // CODECOPY
+      '61' +
+      lenHex + // PUSH2 <len>
+      '60' +
+      '00' + // PUSH1 0x00
+      'f3' + // RETURN
+      rt; // <runtime>
+
+    this.logger.log(
+      `Wrapped runtime into creation: runtimeLen=${len} bytes, initLen=${init.length / 2} bytes`,
+    );
+
+    return init;
+  }
+
+  private extractBytecode(value: any): string | undefined {
+    if (!value) return undefined;
+
+    // Foundry / raw hex
+    if (typeof value === 'string') {
+      return value.startsWith('0x') ? value : '0x' + value;
+    }
+
+    // Hardhat format:
+    // bytecode: { object: "...", sourceMap: "...", linkReferences: {...} }
+    if (typeof value === 'object' && typeof value.object === 'string') {
+      return value.object.startsWith('0x')
+        ? value.object
+        : '0x' + value.object;
+    }
+
+    return undefined;
   }
 }
