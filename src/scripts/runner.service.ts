@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   Ctx,
   CtxPhase,
@@ -13,9 +13,30 @@ import {
 } from './types';
 import { TraceStep } from '../evm/types';
 
+function deepClone<T = any>(value: T): T {
+  return JSON.parse(
+    JSON.stringify(value, (_, v) => {
+      if (typeof v === 'bigint') return v.toString();
+      if (typeof v === 'function') return undefined;
+      return v;
+    }),
+  );
+}
+
+function cloneStep(step: TraceStep | undefined): StepSnapshot | undefined {
+  if (!step) return undefined;
+  return {
+    pc: step.pc,
+    opcode: step.opcode,
+    stack: step.stack.map((x) => x.toString()), // bigint → string
+    rawMemory: step.rawMemory ? [...step.rawMemory] : undefined,
+    rawStorage: step.rawStorage ? { ...step.rawStorage } : undefined,
+  };
+}
+
 @Injectable()
 export class ScriptRunnerService {
-  //private readonly logger = new Logger(ScriptRunnerService.name);
+  private readonly logger = new Logger(ScriptRunnerService.name);
 
   async runForTx(
     env: RunnerEnv,
@@ -39,7 +60,7 @@ export class ScriptRunnerService {
     const setResult = (id: string, v: any) => results.set(id, v);
 
     // Создание ctx
-    const build = (
+    const buildCtx = (
       scriptId: string,
       stepIndex: number,
       step?: TraceStep,
@@ -123,27 +144,6 @@ export class ScriptRunnerService {
       };
     };
 
-    function deepClone<T = any>(value: T): T {
-      return JSON.parse(
-        JSON.stringify(value, (_, v) => {
-          if (typeof v === 'bigint') return v.toString();
-          if (typeof v === 'function') return undefined;
-          return v;
-        }),
-      );
-    }
-
-    function cloneStep(step: TraceStep | undefined): StepSnapshot | undefined {
-      if (!step) return undefined;
-      return {
-        pc: step.pc,
-        opcode: step.opcode,
-        stack: step.stack.map((x) => x.toString()), // bigint → string
-        rawMemory: step.rawMemory ? [...step.rawMemory] : undefined,
-        rawStorage: step.rawStorage ? { ...step.rawStorage } : undefined,
-      };
-    }
-
     const snapshot = (
       scriptId: string,
       phase: CtxPhase,
@@ -170,7 +170,7 @@ export class ScriptRunnerService {
     // onTxStart
     for (const s of sorted) {
       if (s.onTxStart) {
-        const ctx = build(s.id, 0);
+        const ctx = buildCtx(s.id, 0);
         await s.onTxStart(ctx);
         snapshot(s.id, 'onTxStart', 0, ctx);
       }
@@ -179,7 +179,7 @@ export class ScriptRunnerService {
     // onStart
     for (const s of sorted) {
       if (s.onStart) {
-        const ctx = build(s.id, 0);
+        const ctx = buildCtx(s.id, 0);
         await s.onStart(ctx);
         snapshot(s.id, 'onStart', 0, ctx);
       }
@@ -189,7 +189,7 @@ export class ScriptRunnerService {
     for (let i = 0; i < env.trace.length; i++) {
       for (const s of sorted) {
         if (s.onStep) {
-          const ctx = build(s.id, i, env.trace[i]);
+          const ctx = buildCtx(s.id, i, env.trace[i]);
           await s.onStep(ctx, env.trace[i]);
           snapshot(s.id, 'onStep', i, ctx);
         }
@@ -202,7 +202,7 @@ export class ScriptRunnerService {
     for (const s of sorted) {
       if (s.onFinish) {
         const last = Math.max(0, env.trace.length - 1);
-        const ctx = build(s.id, last);
+        const ctx = buildCtx(s.id, last);
         const data = await s.onFinish(ctx);
         snapshot(s.id, 'onFinish', last, ctx);
 
@@ -217,7 +217,7 @@ export class ScriptRunnerService {
     for (const s of sorted) {
       if (s.onTxEnd) {
         const last = Math.max(0, env.trace.length - 1);
-        const ctx = build(s.id, last);
+        const ctx = buildCtx(s.id, last);
         await s.onTxEnd(ctx);
         snapshot(s.id, 'onTxEnd', last, ctx);
       }
@@ -231,6 +231,80 @@ export class ScriptRunnerService {
     };
   }
 
+  async runOnDeploy(
+    env: RunnerEnv,
+    scripts: ScriptLifecycle[],
+  ): Promise<RunnerOutput> {
+    const snapshots: CtxSnapshot[] = [];
+    const marks: PcMark[] = [];
+    const views: ViewDescriptor[] = [];
+    const scriptResults: ScriptResult[] = [];
+    const shared = {};
+
+    const buildCtx = (scriptId: string): Ctx => ({
+      // статический контекст:
+      contractAddress: env.contractAddress,
+      runtimeBytecode: env.runtimeBytecode,
+      creationBytecode: env.creationBytecode,
+      runtimeDisasm: env.runtimeDisasm,
+      creationDisasm: env.creationDisasm,
+      trace: env.trace,
+      tx: env.tx,
+      isCreationPhase: env.isCreationPhase,
+
+      // шаги: на deploy шага нет
+      stepIndex: -1,
+      step: undefined as any,
+      pc: 0,
+      opcodeByte: 0,
+      opcodeName: '',
+
+      // state:
+      store: {}, // отдельный store на скрипт
+      shared, // либо общий объект, если ты его держишь
+
+      // утилиты:
+      log: (msg) => this.logger.log(`[${scriptId}] ${msg}`),
+      warn: (msg) => this.logger.warn(`[${scriptId}] ${msg}`),
+      error: (msg) => this.logger.error(`[${scriptId}] ${msg}`),
+      markPc: () => {},
+      registerView: () => {},
+      getResult: () => {},
+      stack: [],
+      isJump: false,
+      isCall: false,
+      isTerminator: false,
+      isPush: false,
+      isDup: false,
+      isSwap: false,
+      setResult: function (scriptId: string, value: any): void {
+        throw new Error('Function not implemented.');
+      },
+    });
+
+    const snapshot = (scriptId: string, ctx: Ctx) => {
+      snapshots.push({
+        scriptId,
+        phase: 'onDeploy',
+        stepIndex: -1,
+        snapshot: {
+          step: undefined,
+          store: deepClone(ctx.store),
+          shared: deepClone(ctx.shared),
+        },
+      });
+    };
+
+    for (const s of scripts) {
+      if (!s.onDeploy) continue;
+
+      const ctx = buildCtx(s.id);
+      await s.onDeploy(ctx);
+      snapshot(s.id, ctx);
+    }
+
+    return { scripts: scriptResults, marks, views, snapshots };
+  }
   // ----------- DEPENDENCY SORT ----------
   private sortByDependencies(scripts: ScriptLifecycle[]): ScriptLifecycle[] {
     const byId = new Map<string, ScriptLifecycle>();
@@ -249,18 +323,14 @@ export class ScriptRunnerService {
     for (const s of scripts) {
       for (const dep of s.dependsOn || []) {
         if (!byId.has(dep))
-          throw new Error(
-            `Script "${s.id}" depends on missing "${dep}"`,
-          );
+          throw new Error(`Script "${s.id}" depends on missing "${dep}"`);
 
         indeg.set(s.id, (indeg.get(s.id) ?? 0) + 1);
         adj.get(dep)!.push(s.id);
       }
     }
 
-    const q = [...[...indeg].filter(([_, v]) => v === 0)].map(
-      ([id]) => id,
-    );
+    const q = [...[...indeg].filter(([_, v]) => v === 0)].map(([id]) => id);
 
     const out: ScriptLifecycle[] = [];
 
@@ -269,7 +339,7 @@ export class ScriptRunnerService {
       out.push(byId.get(id)!);
 
       for (const nxt of adj.get(id)!) {
-        indeg.set(nxt, (indeg.get(nxt)! - 1));
+        indeg.set(nxt, indeg.get(nxt)! - 1);
         if (indeg.get(nxt) === 0) q.push(nxt);
       }
     }

@@ -307,7 +307,7 @@ export interface CtxSnapshot {
 Пример запуска anvil:
 
 ```bash
-anvil
+anvil --steps-tracing
 ```
 
 Пример запуска бекенда:

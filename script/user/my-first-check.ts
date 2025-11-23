@@ -4,6 +4,10 @@ const script: ScriptLifecycle = {
   id: 'user.myFirstCheck',
   dependsOn: ['core.heatmap'],
 
+  onDeploy(ctx: Ctx){
+    ctx.log('User script onDeploy executed');
+  },
+
   onFinish(ctx: Ctx) {
     const heatmap = ctx.getResult('core.heatmap');
     ctx.log(`Heatmap totalSteps = ${heatmap?.totalSteps}`);

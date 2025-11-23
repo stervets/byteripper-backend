@@ -57,6 +57,7 @@ export interface Ctx {
 }
 
 export type CtxPhase =
+  | 'onDeploy'
   | 'onTxStart'
   | 'onStart'
   | 'onStep'
@@ -103,15 +104,14 @@ export interface ScriptLifecycle {
   dependsOn?: string[];
 
   /**
-   * вызывается, когда контракт заново задеплоен
-   * (или при первой загрузке, если deploy был в этом запуске)
+   * вызывается, когда контракт задеплоен (или передеплоен)
    *
    * Важно, потому что:
    * - некоторые скрипты анализируют init-код
    * - некоторые скрипты строят структуры, которые зависят от байткода
    * - init-код может перегенерироваться при повторном запуске
    */
-  onRedeploy?: (ctx: Ctx) => Promise<void> | void;
+  onDeploy?: (ctx: Ctx) => Promise<void> | void;
 
   /**
    * вызывается на каждый новый tx (даже если trace пустой)

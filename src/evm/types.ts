@@ -28,6 +28,7 @@ export interface DeployResult {
   contractAddress?: string;
   runtimeBytecode: string;
   creationBytecode?: string;
+  tx: TxMeta;
 }
 
 export interface RawStructLog {

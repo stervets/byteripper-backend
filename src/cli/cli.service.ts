@@ -8,7 +8,7 @@ import { TraceService } from '../evm/trace.service';
 import { ScriptRunnerService } from '../scripts/runner.service';
 import { ScriptLoaderService } from '../scripts/script-loader.service';
 import { RunnerEnv } from '../scripts/types';
-import { TxMeta } from '../evm/types';
+import { DeployResult, TxMeta } from '../evm/types';
 
 @Injectable()
 export class CliService {
@@ -35,10 +35,11 @@ export class CliService {
     let runtimeBytecode: string;
     let creationBytecode: string | undefined;
     let contractAddress: string | undefined;
+    let deployed: DeployResult;
 
     if (ext === '.json') {
       // артефакт
-      const deployed = await this.evm.loadFromJsonAndMaybeDeploy(targetPath);
+      deployed = await this.evm.loadFromJsonAndMaybeDeploy(targetPath);
       runtimeBytecode = deployed.runtimeBytecode;
       creationBytecode = deployed.creationBytecode;
       contractAddress = deployed.contractAddress;
@@ -46,9 +47,9 @@ export class CliService {
       // файл с runtime-байткодом
       const content = await fs.readFile(targetPath, 'utf8');
       runtimeBytecode = content.trim();
-      const res = await this.evm.fromRuntimeOnly(runtimeBytecode);
-      contractAddress = res.contractAddress;
-      creationBytecode = res.creationBytecode;
+      deployed = await this.evm.fromRuntimeOnly(runtimeBytecode);
+      contractAddress = deployed.contractAddress;
+      creationBytecode = deployed.creationBytecode;
     }
 
     if (!contractAddress) {
@@ -65,6 +66,25 @@ export class CliService {
     const creationDisasm = creationBytecode
       ? this.bytecode.disassemble(creationBytecode)
       : [];
+
+    let env: RunnerEnv = {
+      contractAddress,
+      runtimeBytecode,
+      creationBytecode,
+      runtimeDisasm,
+      creationDisasm,
+      trace: [],             // на deploy можно пустой
+      tx: deployed.tx,  // если есть отдельный deploy-tx
+      isCreationPhase: false,
+    };
+
+    // грузим все скрипты (core + user)
+    const scripts = await this.scriptLoader.loadAllScripts();
+
+    const deployOutput = await this.scriptRunner.runOnDeploy(env, scripts);
+
+    this.logger.log('Deploy-time script results:');
+    console.dir(deployOutput.scripts, { depth: null });
 
     // простая транза для получения трейса
     const { txHash, txMeta } = await this.evm.sendSimpleTxWithMeta(
@@ -86,8 +106,7 @@ export class CliService {
       );
     }
 
-    // RunnerEnv
-    const env: RunnerEnv = {
+    env = {
       contractAddress,
       runtimeBytecode,
       creationBytecode,
@@ -97,9 +116,6 @@ export class CliService {
       tx: txMeta as TxMeta,
       isCreationPhase: false,
     };
-
-    // грузим все скрипты (core + user)
-    const scripts = await this.scriptLoader.loadAllScripts();
 
     this.logger.log(
       `Executing scripts: ${scripts.map((s) => s.id).join(', ')}`,

@@ -1,6 +1,10 @@
 // src/evm/evm.service.ts
 import { Injectable, Logger } from '@nestjs/common';
-import { JsonRpcProvider, TransactionResponse } from 'ethers';
+import {
+  JsonRpcProvider,
+  TransactionReceipt,
+  TransactionResponse,
+} from 'ethers';
 import * as fs from 'fs/promises';
 import { DeployResult, TxMeta } from './types';
 import { AccountService } from './account.service';
@@ -46,18 +50,16 @@ export class EvmService {
     }
 
     // ⬇️ И ДАЛЬШЕ УЖЕ ТОЛЬКО СТРОКИ
-    const creationBytecode: string | undefined = creationStr;
+    const creationBytecode: string = creationStr || '';
     const runtimeBytecode: string = runtimeStr;
 
-    let contractAddress;
-    if (creationBytecode) {
-      contractAddress = await this.deployRaw(creationBytecode);
-    }
+    const { contractAddress, tx } = await this.deployRaw(creationBytecode);
 
     return {
       contractAddress,
       runtimeBytecode,
-      creationBytecode
+      creationBytecode,
+      tx,
     };
   }
 
@@ -72,12 +74,13 @@ export class EvmService {
     );
 
     const creationBytecode = this.wrapRuntimeIntoCreation(hex);
-    const contractAddress = await this.deployRaw(creationBytecode);
+    const { contractAddress, tx } = await this.deployRaw(creationBytecode);
 
     return {
       contractAddress,
       runtimeBytecode: hex,
-      creationBytecode
+      creationBytecode,
+      tx,
     };
   }
 
@@ -89,27 +92,56 @@ export class EvmService {
     }
   }
 
-  private async deployRaw(creationBytecode: string): Promise<string> {
+  private async deployRaw(
+    creationBytecode: string,
+  ): Promise<{ contractAddress: string; tx: TxMeta }> {
     await this.accounts.loadAccounts();
     const from = this.accounts.get(0);
 
     this.logger.log(`Deploying from ${from}...`);
 
-    const txHash = await (this.provider as any).send('eth_sendTransaction', [
-      {
-        from,
-        data: creationBytecode,
-      },
-    ]);
+    const txHash: string = await (this.provider as any).send(
+      'eth_sendTransaction',
+      [
+        {
+          from,
+          data: creationBytecode,
+        },
+      ],
+    );
 
-    const receipt = await this.waitForReceipt(txHash);
+    const receipt: TransactionReceipt = await this.waitForReceipt(txHash);
 
     if (!receipt.contractAddress) {
       throw new Error('Deploy failed: no contractAddress in receipt');
     }
 
+    const tx: TransactionResponse | null =
+      await this.provider.getTransaction(txHash);
+
+    if (tx === null) {
+      throw new Error(`deployRaw: TransactionResponse error. ${txHash}`);
+    }
+
+    const txMeta: TxMeta = {
+      hash: tx.hash,
+      from: tx.from!,
+      to: tx.to ?? undefined,
+      value: tx.value ? BigInt(tx.value.toString()) : 0n,
+      gasUsed: BigInt(receipt.gasUsed.toString()),
+      status: receipt.status ?? undefined,
+      input: tx.data,
+      nonce: tx.nonce,
+      blockNumber: receipt.blockNumber ?? undefined,
+      contractAddress: receipt.contractAddress ?? undefined,
+    };
+
     this.logger.log(`Deployed at: ${receipt.contractAddress}`);
-    return receipt.contractAddress;
+
+    return {
+      contractAddress: receipt.contractAddress,
+      tx: txMeta,
+    };
   }
 
   /**
@@ -157,7 +189,8 @@ export class EvmService {
     );
 
     const receipt = await this.waitForReceipt(txHash);
-    const tx: TransactionResponse | null = await this.provider.getTransaction(txHash);
+    const tx: TransactionResponse | null =
+      await this.provider.getTransaction(txHash);
 
     if (tx === null) {
       throw new Error(
