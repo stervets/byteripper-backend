@@ -81,16 +81,6 @@ export class ScriptLoaderService {
         );
       }
 
-      if (script.id !== cfg.id) {
-        throw new Error(
-          `Script id mismatch for "${cfg.file}" (${kind}): index.json has "${cfg.id}", script has "${script.id}"`,
-        );
-      }
-
-      if (cfg.dependsOn) {
-        script.dependsOn = cfg.dependsOn;
-      }
-
       scripts.push(script);
     }
 

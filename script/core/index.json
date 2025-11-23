@@ -1,7 +1,6 @@
 {
   "scripts": [
     {
-      "id": "core.heatmap",
       "file": "heatmap.ts",
       "enabled": true
     }
