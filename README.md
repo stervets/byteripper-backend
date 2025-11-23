@@ -1,216 +1,326 @@
-# EVM ByteRipper — Backend
+# EVM ByteRipper Backend
 
-Forensic-grade движок анализа байткода и трейсов EVM.  
-Этот репозиторий — **только backend-ядро** ByteRipper.
+Backend — это минималистичный движок для запуска EVM-транзакции, съёма трейса и прогонки его через скриптовый рантайм.
 
----
+Он **ничего не знает** про аналитику: вся логика анализа живёт в скриптах (TypeScript), а бекенд отвечает только за:
 
-## 🧠 Идея
+- работу с Anvil (деплой контракта, отправка транзакций)
+- получение `runtimeBytecode` / `creationBytecode`
+- дизассемблирование байткода в `{ pc, byte }`
+- получение `debug_traceTransaction`
+- сбор `RunnerEnv`
+- загрузку/запуск скриптов и возврат результатов
 
-Backend делает **минимальный честный минимум**:
-
-* подключается к EVM-ноде (обычно `anvil`)
-* деплоит контракт:
-  * либо из JSON-артефакта (Foundry/Hardhat)
-  * либо из голого `runtimeBytecode` (оборачивая его в минимальный init-код)
-* исполняет транзакции на контракте
-* получает `debug_traceTransaction`
-* делает *raw* disasm байткода: `{ pc, byte }`
-* формирует контекст исполнения (`Ctx`) и пробрасывает его в ScriptRunner
-
-Вся аналитика (CFG, unreachable, security-паттерны, heatmap, storage-diff и т.д.)
-живет в **TS-скриптах**, а не в backend-ядре.
-
-Backend = **тонкий EVM-проводник + генератор Ctx**.
+Фронтенд (потом) будет просто отрисовывать JSON, который вернёт бекенд.
 
 ---
 
-## 📁 Структура (MVP)
+## Стек
 
-```txt
+- Node.js + Yarn
+- NestJS
+- Anvil (foundry) как локальный EVM-узел
+- ethers v6 для RPC/транзакций
+
+---
+
+## Структура проекта
+
+Ожидаемая структура каталога `backend`:
+
+```text
 backend/
   src/
     main.ts
     app.module.ts
 
-    cli/
-      cli.module.ts
-      cli.service.ts
-
     evm/
       evm.module.ts
-      evm.service.ts
-      bytecode.service.ts
-      trace.service.ts
-      account.service.ts
-      types.ts
+      evm.service.ts          # деплой, отправка транзакций, базовый RPC
+      bytecode.ts             # дизассемблер runtime/creation байткода в RawByte[]
+      trace-adapter.ts        # адаптер debug_traceTransaction → TraceStep[]
+      opcodes-list.ts         # справочник опкодов
+      abi.types.ts            # типы для метаданных транзакций и ABI
+      workspace.service.ts    # (опционально) работа с путями/артефактами
 
-    scripts/          # (дальше)
-      scripts.module.ts
-      runner.service.ts
-      types.ts        # Ctx, ViewDescriptor, ScriptLifecycle
+    cli/
+      cli.module.ts
+      cli.service.ts          # точка входа CLI: принимает argv, гоняет пайплайн
+
+    scripts/
+      types.ts                # Ctx, ScriptLifecycle, RunnerEnv, CtxSnapshot и т.п.
+      runner.service.ts       # ScriptRunnerService: lifecycle скриптов
+      script-loader.service.ts# ScriptLoaderService: загрузка core/user скриптов
+      scripts.module.ts       # экспорт ScriptRunnerService
+      script-loader.module.ts # экспорт ScriptLoaderService
+
+  script/
+    core/
+      index.json              # список core-скриптов
+      heatmap.ts              # пример системного скрипта: PC heatmap и view
+
+    user/
+      index.json              # список пользовательских скриптов
+      my-first-check.ts       # пример user-скрипта
 ```
 
-Папки `scripts/` пока могут быть пустыми — они появятся, когда подключим ScriptRunner.
+> В git можно включать только `script/core`, а `script/user` при желании добавить в `.gitignore` как локальную песочницу.
 
 ---
 
-## 🚀 Запуск
+## Жизненный цикл CLI
 
-### Требования
+Запуск:
 
-* Node.js (20+)
-* yarn
-* локальная EVM-нода (по умолчанию `anvil`)
+```bash
+yarn dev <target>
+```
+
+Где `<target>`:
+
+- либо путь к артефакту JSON (например, forge):  
+  `../../playground/out/test1.sol/Test1.json`
+- либо путь к файлу с **runtime байткодом** (одна строка `0x...`):  
+  `../runtime-loop.txt`
+
+Пайплайн `CliService`:
+
+1. Разобрать аргумент:
+   - если `.json` → прочитать артефакт, достать `runtimeBytecode` и (если есть) `creationBytecode`
+   - иначе → считать файл как чистый `runtimeBytecode`
+2. Задеплоить контракт в Anvil:
+   - если есть `creationBytecode` → деплоим как есть
+   - если только `runtimeBytecode` → оборачиваем в минимальный init-код и деплоим
+3. Получить `contractAddress`.
+4. Сделать дизассемблирование:
+   - `runtimeDisasm: RawByte[]` — массив `{ pc, byte }`
+   - `creationDisasm: RawByte[]` — если есть creation-код
+5. Отправить простую транзакцию на контракт (без calldata, пока как smoke-test).
+6. Получить `debug_traceTransaction` от Anvil.
+7. Преобразовать raw trace → `TraceStep[]` (pc, opcode, gas, stack, rawMemory, rawStorage…).
+8. Собрать `RunnerEnv`:
+   - `contractAddress`
+   - `runtimeBytecode` / `creationBytecode`
+   - `runtimeDisasm` / `creationDisasm`
+   - `trace: TraceStep[]`
+   - `tx: TxMeta` (hash, from, to, value, gasUsed, status, input, nonce…)
+   - `isCreationPhase` (bool)
+9. Загрузить все скрипты через `ScriptLoaderService` (core + user).
+10. Прогнать всё через `ScriptRunnerService.runForTx(env, scripts)`.
+11. Вывести в лог:
+    - результаты скриптов (`scripts`)
+    - зарегистрированные view (`views`)
+    - метки по PC (`marks`)
+    - снапшоты (`snapshots`) — для форензики скриптов, не для пользователя.
+
+---
+
+## Скриптовая система
+
+### Интерфейс скрипта
+
+Скрипт — это обычный TS-файл, который экспортирует `default`:
+
+```ts
+import type { ScriptLifecycle, Ctx } from '../../src/scripts/types';
+
+const script: ScriptLifecycle = {
+  id: 'core.heatmap',
+  dependsOn: [],
+
+  onStart(ctx: Ctx) {
+    ctx.store.pcHits = new Map<number, number>();
+  },
+
+  onStep(ctx: Ctx) {
+    const pcHits: Map<number, number> =
+      ctx.store.pcHits ?? new Map<number, number>();
+
+    const prev = pcHits.get(ctx.pc) ?? 0;
+    pcHits.set(ctx.pc, prev + 1);
+
+    ctx.store.pcHits = pcHits;
+  },
+
+  onFinish(ctx: Ctx) {
+    const pcHits: Map<number, number> =
+      ctx.store.pcHits ?? new Map<number, number>();
+
+    const data: Record<number, number> = {};
+    for (const [pc, count] of pcHits.entries()) {
+      data[pc] = count;
+    }
+
+    const payload = {
+      totalSteps: ctx.trace.length,
+      pcHits: data,
+    };
+
+    ctx.registerView({
+      id: 'core.heatmap',
+      scriptId: 'core.heatmap',
+      type: 'heatmap',
+      title: 'PC Heatmap',
+      data: payload,
+    });
+
+    return payload;
+  },
+};
+
+export default script;
+```
+
+Точки расширения:
+
+- `id: string` — глобальный идентификатор скрипта (например, `core.heatmap`, `user.myFirstCheck`)
+- `dependsOn?: string[]` — список других скриптов, чьи результаты нужны (по `id`)
+- `onTxStart?(ctx)` — вызывается один раз на транзакцию, до обхода трейса
+- `onStart?(ctx)` — вызывается один раз перед первым шагом трейса
+- `onStep?(ctx, step)` — вызывается для каждого шага трейса
+- `onFinish?(ctx)` — вызывается один раз после последнего шага; результат сохраняется в `RunnerOutput.scripts`
+- `onTxEnd?(ctx)` — финальный хук после всего цикла
+
+### Где лежат скрипты
+
+Core-скрипты:
+
+```text
+backend/script/core/index.json
+backend/script/core/*.ts
+```
+
+Пример `backend/script/core/index.json`:
+
+```json
+{
+  "scripts": [
+    {
+      "file": "heatmap.ts",
+      "enabled": true
+    }
+  ]
+}
+```
+
+User-скрипты:
+
+```text
+backend/script/user/index.json
+backend/script/user/*.ts
+```
+
+Пример `backend/script/user/index.json`:
+
+```json
+{
+  "scripts": [
+    {
+      "file": "my-first-check.ts",
+      "enabled": true
+    }
+  ]
+}
+```
+
+ID и зависимости (`id`, `dependsOn`) задаются **только в TS-файле**, `index.json` отвечает за то, какие файлы вообще грузить.
+
+---
+
+## Ctx (контекст скрипта)
+
+Скрипт получает на вход объект `ctx: Ctx`, который содержит:
+
+### Статический контекст
+
+- `contractAddress: string`
+- `runtimeBytecode: string`
+- `creationBytecode?: string`
+- `runtimeDisasm: RawByte[]` — `{ pc, byte }`
+- `creationDisasm: RawByte[]`
+- `trace: TraceStep[]` — весь трейс
+- `tx: TxMeta` — метаданные транзакции
+- `isCreationPhase: boolean` — режим анализа (creation/runtime)
+
+### Текущий шаг
+
+- `stepIndex: number` — индекс шага в трейсе
+- `step: TraceStep` — текущий шаг
+- `pc: number`
+- `opcodeByte: number`
+- `opcodeName: string`
+- `stack: bigint[]`
+- `rawMemory?: string[]`
+- `rawStorage?: Record<string, string>`
+
++ предрасчитанные флаги:
+
+- `isJump`, `isCall`, `isTerminator`, `isPush`, `isDup`, `isSwap`
+
+### Состояние
+
+- `store: Record<string, any>` — личный state скрипта
+- `shared: Record<string, any>` — общие данные между скриптами
+
+### Утилиты
+
+- `log(msg: string)` / `warn(msg: string)` / `error(msg: string)` — логирование
+- `markPc(pc: number, kind: 'danger' | 'info' | 'warn', label?: string)` — пометка проблемных участков байткода
+- `registerView(view: ViewDescriptor)` — регистрация view для фронта (heatmap, таблицы, графы и т.п.)
+- `getResult(scriptId: string)` — получить результат другого скрипта (по `id`)
+- `setResult(scriptId: string, data: any)` — (опционально) явная запись результата скрипта
+
+---
+
+## RunnerOutput и снапшоты
+
+`ScriptRunnerService.runForTx(env, scripts)` возвращает:
+
+- `scripts: { scriptId, data }[]` — результаты `onFinish`
+- `views: ViewDescriptor[]` — зарегистрированные визуализации
+- `marks: PcMark[]` — пометки по PC (danger/info/warn)
+- `snapshots: CtxSnapshot[]` — форензика состояния `store/shared` и шага по фазам lifecycle
+
+Снапшоты содержат **только динамическое состояние**, без тяжёлых структур:
+
+```ts
+export interface CtxSnapshot {
+  phase: 'onTxStart' | 'onStart' | 'onStep' | 'onFinish' | 'onTxEnd';
+  scriptId: string;
+  stepIndex: number;
+  snapshot: {
+    step?: StepSnapshot; // pc, opcode, stack[], rawMemory, rawStorage
+    store: any;
+    shared: any;
+  };
+}
+```
+
+---
+
+## Требования к окружению
+
+- Node.js 20+
+- Yarn
+- Anvil (foundry) запущен локально, по умолчанию на `http://127.0.0.1:8545`
+
+Пример запуска anvil:
 
 ```bash
 anvil
 ```
 
-Backend по умолчанию лезет на `http://127.0.0.1:8545`  
-(можно переопределить через `RPC_URL`).
-
-### Dev-запуск
+Пример запуска бекенда:
 
 ```bash
-yarn dev path/to/contract.json
+cd backend
+yarn install
+yarn dev ../../playground/out/test1.sol/Test1.json
 # или
-yarn dev path/to/runtime.txt
+yarn dev ../runtime-loop.txt
 ```
 
-Где:
-
-* `contract.json` — артефакт компиляции Solidity (Foundry/Hardhat), содержащий:
-  * `bytecode` (creation)
-  * `deployedBytecode` (runtime)
-* `runtime.txt` — текстовый файл с `0x...` runtime-кодом
-
-При запуске backend:
-
-1. читает файл
-2. деплоит контракт в `anvil`:
-   * из `bytecode` (если есть)
-   * или, если есть только runtime, — оборачивает его в минимальный init-код и деплоит
-3. делает первичный disasm runtime-кода
-4. шлёт простую транзу на контракт
-5. забирает `debug_traceTransaction` и печатает первые шаги трейса
-
 ---
 
-## 📦 Что уже умеет backend
-
-* Деплой контракта:
-  * `loadFromJsonAndMaybeDeploy(path)`
-  * `fromRuntimeOnly(runtimeBytecode)`
-* Генерация init-кода из runtime:
-  * `wrapRuntimeIntoCreation(runtimeHex)`
-* Первичный disasm:
-  * `BytecodeService.disassemble(runtimeBytecode) → RawByte[]`
-* Отправка транзакции:
-  * `sendSimpleTx(to, fromIndex = 0)`
-* Получение трейса:
-  * `TraceService.debugTrace(txHash) → TraceStep[]`
-* Работа с аккаунтами anvil:
-  * `AccountService.loadAccounts() / get(index)`
-
----
-
-## 🧱 Ctx (контекст для скриптов)
-
-Backend не анализирует контракт.  
-Он просто формирует **богатый контекст исполнения**, который передаётся в ScriptRunner.
-
-Идея:
-
-```ts
-interface Ctx {
-  // --- Статический контекст анализа ---
-  contractAddress: string;
-  runtimeBytecode: string;
-  creationBytecode?: string;
-
-  runtimeDisasm: RawByte[];     // [{ pc, byte }]
-  creationDisasm: RawByte[];    // [{ pc, byte }]
-
-  trace: TraceStep[];           // весь трейс
-  tx: TxMeta;                   // данные по текущей транзакции
-  isCreationPhase: boolean;     // init-code vs runtime
-
-  // --- Текущий шаг ---
-  stepIndex: number;
-  step: TraceStep;
-  pc: number;
-
-  opcodeByte: number;
-  opcodeName: string;
-
-  // Алиасы для удобства
-  stack: bigint[];
-  memory: Uint8Array | undefined;
-  storage: Record<string, string> | undefined;
-
-  // --- Флаги ---
-  isJump: boolean;
-  isCall: boolean;
-  isTerminator: boolean;
-  isPush: boolean;
-  isDup: boolean;
-  isSwap: boolean;
-
-  // --- Хранилище между вызовами ---
-  store: Record<string, any>;   // личный state скрипта
-  shared: Record<string, any>;  // общие данные (через dependsOn)
-
-  // --- Логи ---
-  log(msg: string): void;
-  warn(msg: string): void;
-  error(msg: string): void;
-
-  // --- Метки PC для фронта ---
-  markPc(pc: number, kind: 'danger' | 'info' | 'warn', label?: string): void;
-
-  // --- Регистрация view'шек для фронта ---
-  registerView(view: ViewDescriptor): void;
-
-  // --- Межскриптовый обмен ---
-  getResult(scriptId: string): any | undefined;
-  setResult(scriptId: string, value: any): void;
-}
-```
-
-ScriptRunner будет создавать `Ctx` на каждый шаг трейса и вызывать:
-
-* `onTxStart(ctx)`
-* `onStart(ctx)`
-* `onStep(ctx)`
-* `onFinish(ctx)`
-* `onTxEnd(ctx)`
-
-Backend отвечает только за:
-
-* заполнение `Ctx` сырыми данными
-* вызов ScriptRunner
-* возврат результатов фронту (`views`, `marks`, `scriptResults`)
-
----
-
-## 🧨 Что backend **не** делает
-
-* не парсит / не декодирует ABI
-* не пытается понять сигнатуры функций
-* не подменяет байткод
-* не скрывает unreachable
-* не «улучшает» картину для юзера
-
-Все решения об анализе контракта принимают **скрипты**, а не backend.
-
----
-
-## Дальше
-
-Следующий шаг после этого README:
-
-1. зафиксировать общий `Ctx` и типы (`TraceStep`, `TxMeta`, `ViewDescriptor`, `ScriptResult`)
-2. реализовать `scripts/runner.service.ts` (ScriptRunner)
-3. добавить первые core-скрипты (например, простой heatmap по PC).
-
+Этот README описывает текущую архитектуру бекенда EVM ByteRipper:  
+тонкий NestJS-движок + TS-скриптовый рантайм для forensic-анализа байткода и трейсов EVM.
