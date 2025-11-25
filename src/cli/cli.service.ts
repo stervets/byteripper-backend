@@ -22,6 +22,7 @@ export class CliService {
     private readonly scriptLoader: ScriptLoaderService,
   ) {}
 
+  /*
   async run(argv: string[]): Promise<void> {
     if (!argv[0]) {
       this.logger.error('Usage: yarn dev <path-to-json-or-runtime-file>');
@@ -130,4 +131,5 @@ export class CliService {
     this.logger.log(`Marks count: ${output.marks.length}`);
     this.logger.log(`Snapshots count: ${output.snapshots.length}`);
   }
+  */
 }

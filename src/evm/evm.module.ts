@@ -5,8 +5,14 @@ import { BytecodeService } from './bytecode.service';
 import { TraceService } from './trace.service';
 import { JsonRpcProvider } from 'ethers';
 import { AccountService } from './account.service';
+import { ScriptsModule } from '../scripts/scripts.module';
+import { ScriptsLoaderModule } from '../scripts/script-loader.module';
 
 @Module({
+  imports: [
+    ScriptsModule,
+    ScriptsLoaderModule,
+  ],
   providers: [
     {
       provide: JsonRpcProvider,

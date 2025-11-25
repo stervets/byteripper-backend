@@ -25,9 +25,9 @@ export interface ContractJsonArtifact {
  */
 
 export interface DeployResult {
-  contractAddress?: string;
+  contractAddress: string;
   runtimeBytecode: string;
-  creationBytecode?: string;
+  creationBytecode: string;
   tx: TxMeta;
 }
 

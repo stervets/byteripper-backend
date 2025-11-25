@@ -8,14 +8,26 @@ import {
 import * as fs from 'fs/promises';
 import { DeployResult, TxMeta } from './types';
 import { AccountService } from './account.service';
+import { RunnerEnv } from '../scripts/types';
+import { BytecodeService } from './bytecode.service';
+import path from 'path';
+import { ScriptLoaderService } from '../scripts/script-loader.service';
+import { TraceService } from './trace.service';
+import { ScriptRunnerService } from '../scripts/runner.service';
 
 @Injectable()
 export class EvmService {
   private readonly logger = new Logger(EvmService.name);
 
+  public env: RunnerEnv | null = null;
+
   constructor(
     private readonly provider: JsonRpcProvider,
     private readonly accounts: AccountService,
+    private readonly bytecode: BytecodeService,
+    private readonly scriptLoader: ScriptLoaderService,
+    private readonly traceService: TraceService,
+    private readonly scriptRunner: ScriptRunnerService,
   ) {}
 
   async getBalance(addr: string): Promise<bigint> {
@@ -36,7 +48,7 @@ export class EvmService {
     return undefined;
   }
 
-  async loadFromJsonAndMaybeDeploy(path: string): Promise<DeployResult> {
+  async deployFromJson(path: string): Promise<DeployResult> {
     const artifactRaw = await fs.readFile(path, 'utf8');
     const artifactJson = JSON.parse(artifactRaw);
 
@@ -63,9 +75,11 @@ export class EvmService {
     };
   }
 
-  async fromRuntimeOnly(runtimeBytecode: string): Promise<DeployResult> {
-    const hex = runtimeBytecode.trim();
-    if (!hex.startsWith('0x')) {
+  async deployFromBytecode(targetPath: string): Promise<DeployResult> {
+    const content = await fs.readFile(targetPath, 'utf8');
+    const runtimeBytecode = content.trim();
+
+    if (!runtimeBytecode.startsWith('0x')) {
       throw new Error('Runtime bytecode must start with 0x');
     }
 
@@ -73,12 +87,12 @@ export class EvmService {
       'Runtime-only mode: wrapping into minimal creation bytecode and deploying...',
     );
 
-    const creationBytecode = this.wrapRuntimeIntoCreation(hex);
+    const creationBytecode = this.wrapRuntimeIntoCreation(runtimeBytecode);
     const { contractAddress, tx } = await this.deployRaw(creationBytecode);
 
     return {
       contractAddress,
-      runtimeBytecode: hex,
+      runtimeBytecode,
       creationBytecode,
       tx,
     };
@@ -250,5 +264,56 @@ export class EvmService {
     );
 
     return init;
+  }
+
+  async run(targetFile: string) {
+    if (!targetFile) {
+      this.logger.error('Usage: yarn dev <path-to-json-or-runtime-file>');
+      return;
+    }
+
+    const targetPath = path.resolve(targetFile);
+    this.logger.log(`Target: ${targetPath}`);
+
+    const {contractAddress, runtimeBytecode, creationBytecode, tx} =
+      path.extname(targetPath).toLowerCase() === '.json' ?
+      await this.deployFromJson(targetPath) :
+      await this.deployFromBytecode(targetFile);
+
+    if (!contractAddress) {
+      this.logger.error('No contract address after deploy, abort.');
+      return;
+    }
+
+    this.logger.log(
+      `Runtime bytecode length: ${(runtimeBytecode.length - 2) / 2} bytes`,
+    );
+
+    this.logger.log(`Contract deployed at: ${contractAddress}`);
+
+    const runtimeDisasm = this.bytecode.disassemble(runtimeBytecode);
+    const creationDisasm = creationBytecode
+      ? this.bytecode.disassemble(creationBytecode)
+      : [];
+
+    const env: RunnerEnv = {
+      contractAddress,
+      runtimeBytecode,
+      creationBytecode,
+      runtimeDisasm,
+      creationDisasm,
+      trace: [],
+      tx,
+      isCreationPhase: true,
+    };
+
+    // грузим все скрипты (core + user)
+    const scripts = await this.scriptLoader.loadAllScripts();
+    const deployOutput = await this.scriptRunner.runOnDeploy(env, scripts);
+
+    this.logger.log('Deploy-time script results:');
+    console.dir(deployOutput.scripts, { depth: null, colors: true });
+
+    return env;
   }
 }
