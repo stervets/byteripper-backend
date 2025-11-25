@@ -1,17 +1,15 @@
 import { WebSocketServer } from 'ws';
-import { timeout } from './common/utils';
-
-interface WsMessage {
-  event: string;
-  data: any;
-}
+import { safeStringify, timeout } from './common/utils';
+import { EvmService } from './evm/evm.service';
 
 const startupTime = Date.now();
 
 class WS {
   private ws: WebSocketServer;
+  private evm: EvmService;
 
-  init(server: any) {
+  init(server: any, evmService: EvmService) {
+    this.evm = evmService;
     this.ws = new WebSocketServer({
       server,
       path: '/ws',
@@ -47,7 +45,11 @@ class WS {
       }
     };
 
-    Date.now() - startupTime < 1000 && this.send('reloadPage');
+    if (Date.now() - startupTime < 1000) {
+      this.send('reloadPage');
+    } else {
+      socket.send(safeStringify(['updateEnvironment', [this.evm.env]]));
+    }
   }
 
   private broadcast(json: string) {

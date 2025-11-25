@@ -12,16 +12,7 @@ import {
   ViewDescriptor,
 } from './types';
 import { TraceStep } from '../evm/types';
-
-function deepClone<T = any>(value: T): T {
-  return JSON.parse(
-    JSON.stringify(value, (_, v) => {
-      if (typeof v === 'bigint') return v.toString();
-      if (typeof v === 'function') return undefined;
-      return v;
-    }),
-  );
-}
+import { safeDeepClone } from '../common/utils';
 
 function cloneStep(step: TraceStep | undefined): StepSnapshot | undefined {
   if (!step) return undefined;
@@ -156,8 +147,8 @@ export class ScriptRunnerService {
         stepIndex,
         snapshot: {
           step: cloneStep(ctx.step),
-          store: deepClone(ctx.store),
-          shared: deepClone(ctx.shared),
+          store: safeDeepClone(ctx.store),
+          shared: safeDeepClone(ctx.shared),
         },
       });
     };
@@ -289,8 +280,8 @@ export class ScriptRunnerService {
         stepIndex: -1,
         snapshot: {
           step: undefined,
-          store: deepClone(ctx.store),
-          shared: deepClone(ctx.shared),
+          store: safeDeepClone(ctx.store),
+          shared: safeDeepClone(ctx.shared),
         },
       });
     };

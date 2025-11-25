@@ -296,7 +296,7 @@ export class EvmService {
       ? this.bytecode.disassemble(creationBytecode)
       : [];
 
-    const env: RunnerEnv = {
+    this.env = {
       contractAddress,
       runtimeBytecode,
       creationBytecode,
@@ -309,11 +309,11 @@ export class EvmService {
 
     // грузим все скрипты (core + user)
     const scripts = await this.scriptLoader.loadAllScripts();
-    const deployOutput = await this.scriptRunner.runOnDeploy(env, scripts);
+    const deployOutput = await this.scriptRunner.runOnDeploy(this.env, scripts);
 
     this.logger.log('Deploy-time script results:');
     console.dir(deployOutput.scripts, { depth: null, colors: true });
 
-    return env;
+    return this.env;
   }
 }

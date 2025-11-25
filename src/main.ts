@@ -9,9 +9,8 @@ async function bootstrap() {
   const host = '0.0.0.0';
   const port = 9545;
   const server = app.getHttpServer();
-  ws.init(server);
-
   const evmService = app.get(EvmService);
+  ws.init(server, evmService);
   const argv = process.argv.slice(2);
 
   try {
